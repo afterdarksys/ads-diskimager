@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,7 +22,26 @@ var wipeCmd = &cobra.Command{
 		requireDevice(cmd)
 		targetPath := disktoolDevice // comes from root disktool scope
 
-		fmt.Printf("WARNING: You are about to SECURELY WIPE '%s'. This action is IRREVERSIBLE.\n", targetPath)
+		fmt.Println("\n" + strings.Repeat("=", 70))
+		fmt.Println("⚠️  CRITICAL WARNING: DESTRUCTIVE WIPE OPERATION")
+		fmt.Println(strings.Repeat("=", 70))
+		fmt.Printf("You are about to SECURELY WIPE: %s\n", targetPath)
+		fmt.Println("This operation will DESTROY ALL DATA and is IRREVERSIBLE.")
+		fmt.Printf("Wipe pattern: %d-pass DoD 5220.22-M\n", wipePasses)
+		fmt.Println(strings.Repeat("=", 70))
+		fmt.Printf("\nTo confirm, type 'WIPE' in capital letters: ")
+
+		var confirm string
+		fmt.Scanln(&confirm)
+
+		if confirm != "WIPE" {
+			fmt.Printf("\n❌ Confirmation failed. You typed: '%s'\n", confirm)
+			fmt.Println("Aborting wipe operation.")
+			os.Exit(1)
+		}
+
+		fmt.Println("\n✓ Confirmation accepted. Starting wipe in 3 seconds...")
+		time.Sleep(3 * time.Second)
 		fmt.Printf("Executing %d-pass wipe...\n", wipePasses)
 
 		err := WipeDrive(targetPath, wipePasses, func(pass int, copied, total int64) {

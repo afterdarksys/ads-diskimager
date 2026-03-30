@@ -17,6 +17,8 @@ import (
 	"github.com/afterdarksys/diskimager/imager"
 	"github.com/afterdarksys/diskimager/pkg/format/e01"
 	"github.com/afterdarksys/diskimager/pkg/format/raw"
+	"github.com/afterdarksys/diskimager/pkg/geometry"
+	"github.com/afterdarksys/diskimager/pkg/smart"
 	"github.com/afterdarksys/diskimager/pkg/storage"
 	"github.com/spf13/cobra"
 )
@@ -35,7 +37,21 @@ var (
 	examiner string
 	desc     string
 	notes    string
+
+	// Safety flags
+	collectSMART     bool
+	verifyWriteBlock bool
+	collectGeometry  bool
 )
+
+// ResumeMetadata stores state for resuming interrupted imaging sessions
+type ResumeMetadata struct {
+	BytesCopied    int64  `json:"bytes_copied"`
+	HashAlgorithm  string `json:"hash_algorithm"`
+	HashState      []byte `json:"hash_state,omitempty"` // Serialized hash state
+	SourceChecksum string `json:"source_checksum"`       // Hash of source at time of interruption
+	Timestamp      string `json:"timestamp"`
+}
 
 var imageCmd = &cobra.Command{
 	Use:   "image",
@@ -57,13 +73,88 @@ var imageCmd = &cobra.Command{
 			log.Fatalf("Unsupported hash algorithm: %s", hashAlgo)
 		}
 
-		// Read Audit Log if Resuming to find previous size and hash progress
+		// Collect disk geometry if requested
+		var diskGeom *geometry.DiskGeometry
+		if collectGeometry {
+			fmt.Println("Collecting disk geometry...")
+			var geoErr error
+			diskGeom, geoErr = geometry.GetGeometry(inputFile)
+			if geoErr != nil {
+				fmt.Printf("⚠️  Geometry unavailable: %v\n", geoErr)
+			} else {
+				fmt.Printf("✓ Geometry: C=%d H=%d S=%d (Total: %d bytes)\n",
+					diskGeom.Cylinders, diskGeom.Heads, diskGeom.Sectors, diskGeom.TotalSize)
+			}
+		}
+
+		// Collect SMART data if requested
+		var diskInfo *smart.DiskInfo
+		if collectSMART {
+			fmt.Println("Collecting SMART data...")
+			diskInfo = smart.CollectDiskInfo(inputFile)
+			if diskInfo.Available {
+				fmt.Printf("✓ Device: %s %s (S/N: %s)\n", diskInfo.Model, diskInfo.Capacity, diskInfo.Serial)
+				fmt.Printf("✓ SMART Status: %s\n", diskInfo.SMARTStatus)
+				if diskInfo.Temperature != "" {
+					fmt.Printf("✓ Temperature: %s\n", diskInfo.Temperature)
+				}
+				if diskInfo.PowerOnHours != "" {
+					fmt.Printf("✓ Power-On Hours: %s\n", diskInfo.PowerOnHours)
+				}
+			} else {
+				fmt.Printf("⚠️  SMART data unavailable: %s\n", diskInfo.Error)
+			}
+		}
+
+		// Verify write-blocker if requested
+		if verifyWriteBlock {
+			fmt.Println("Checking write-blocker status...")
+			isProtected, err := smart.IsWriteProtected(inputFile)
+			if err != nil {
+				fmt.Printf("⚠️  Cannot verify write-blocker: %v\n", err)
+				fmt.Println("⚠️  Ensure hardware write-blocker is in use!")
+			} else if isProtected {
+				fmt.Println("✓ Device is write-protected")
+			} else {
+				fmt.Println("❌ WARNING: Device is NOT write-protected!")
+				fmt.Println("❌ Use a hardware write-blocker for forensic acquisitions!")
+				fmt.Print("Continue anyway? (type 'yes'): ")
+				var confirm string
+				fmt.Scanln(&confirm)
+				if confirm != "yes" {
+					log.Fatalf("Aborted: Device not write-protected")
+				}
+			}
+		}
+
+		// Read resume metadata if resuming
 		var existingBytesCopied int64 = 0
+		var resumeMeta *ResumeMetadata
+		resumeMetaFile := outputFile + ".resume.json"
+
 		if resume {
-			stat, err := os.Stat(outputFile)
-			if err == nil {
-				existingBytesCopied = stat.Size()
-				fmt.Printf("Resuming from %d bytes...\n", existingBytesCopied)
+			// Try to load resume metadata
+			if data, err := os.ReadFile(resumeMetaFile); err == nil {
+				var meta ResumeMetadata
+				if err := json.Unmarshal(data, &meta); err == nil {
+					resumeMeta = &meta
+					existingBytesCopied = meta.BytesCopied
+					fmt.Printf("Resuming from %d bytes (saved state found)...\n", existingBytesCopied)
+
+					// Verify hash algorithm matches
+					if meta.HashAlgorithm != hashAlgo {
+						log.Fatalf("Hash algorithm mismatch: resume file uses %s, but %s was specified", meta.HashAlgorithm, hashAlgo)
+					}
+				} else {
+					fmt.Printf("Warning: Failed to parse resume metadata, will re-hash: %v\n", err)
+				}
+			} else {
+				// Fallback to old behavior - use file size
+				stat, err := os.Stat(outputFile)
+				if err == nil {
+					existingBytesCopied = stat.Size()
+					fmt.Printf("Resuming from %d bytes (no saved state, will re-hash)...\n", existingBytesCopied)
+				}
 			}
 		}
 
@@ -84,10 +175,22 @@ var imageCmd = &cobra.Command{
 			hasher = sha256.New()
 		}
 
+		// Restore hash state if available, otherwise re-hash existing data
 		if resume && existingBytesCopied > 0 {
-			fmt.Printf("Hashing existing %d bytes from source for resume...\n", existingBytesCopied)
-			if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
-				log.Fatalf("Error hashing input file for resume: %v", err)
+			if resumeMeta != nil && len(resumeMeta.HashState) > 0 {
+				// TODO: Go's standard hash interfaces don't support state serialization
+				// For now, we must re-hash. A future enhancement would use a custom
+				// hash wrapper that supports marshaling/unmarshaling state.
+				fmt.Printf("Note: Hash state restoration not yet implemented, re-hashing %d bytes...\n", existingBytesCopied)
+				if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
+					log.Fatalf("Error hashing input file for resume: %v", err)
+				}
+			} else {
+				// Re-hash existing bytes from source
+				fmt.Printf("Re-hashing existing %d bytes from source for resume...\n", existingBytesCopied)
+				if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
+					log.Fatalf("Error hashing input file for resume: %v", err)
+				}
 			}
 		}
 
@@ -158,12 +261,16 @@ var imageCmd = &cobra.Command{
 		logEntry := struct {
 			Source      string
 			Destination string
+			DiskInfo    *smart.DiskInfo       `json:"disk_info,omitempty"`
+			Geometry    *geometry.DiskGeometry `json:"geometry,omitempty"`
 			Config      imager.Config
 			Result      *imager.Result
 			Error       string `json:",omitempty"`
 		}{
 			Source:      inputFile,
 			Destination: outputFile,
+			DiskInfo:    diskInfo,
+			Geometry:    diskGeom,
 			Config:      cfg,
 			Result:      res,
 		}
@@ -176,11 +283,16 @@ var imageCmd = &cobra.Command{
 		}
 
 		logBytes, _ := json.MarshalIndent(logEntry, "", "  ")
-		// Write Audit as truncation always to keep it clean (unless we merge bad sectors, simple rewrite is easier)
-		if wErr := os.WriteFile(logFile, logBytes, 0644); wErr != nil {
+		// Write Audit with secure permissions (0600 - owner read/write only)
+		if wErr := os.WriteFile(logFile, logBytes, 0600); wErr != nil {
 			log.Printf("Error writing audit log: %v", wErr)
 		} else {
-			fmt.Printf("Audit log written to %s\n", logFile)
+			fmt.Printf("Audit log written to %s (secure permissions)\n", logFile)
+		}
+
+		// Clean up resume metadata file on successful completion
+		if err == nil && res != nil {
+			os.Remove(resumeMetaFile)
 		}
 
 		if res != nil {
@@ -208,7 +320,12 @@ func init() {
 	imageCmd.Flags().StringVar(&examiner, "examiner", "", "Examiner Name")
 	imageCmd.Flags().StringVar(&desc, "desc", "", "Description of evidence")
 	imageCmd.Flags().StringVar(&notes, "notes", "", "Additional notes")
-	
+
+	// Safety and Forensic Flags
+	imageCmd.Flags().BoolVar(&collectSMART, "smart", false, "Collect SMART data from source disk")
+	imageCmd.Flags().BoolVar(&verifyWriteBlock, "verify-write-block", false, "Verify source is write-protected")
+	imageCmd.Flags().BoolVar(&collectGeometry, "geometry", false, "Collect disk geometry (CHS)")
+
 	imageCmd.MarkFlagRequired("in")
 	imageCmd.MarkFlagRequired("out")
 }
@@ -224,12 +341,25 @@ type ProgressReader struct {
 func (pr *ProgressReader) Read(p []byte) (int, error) {
 	n, err := pr.Reader.Read(p)
 	newBytes := atomic.AddInt64(&pr.BytesRead, int64(n))
-	lastPrint := atomic.LoadInt64(&pr.lastPrint)
 
-	if newBytes-lastPrint >= 10*1024*1024 { // Print every 10MB
-		fmt.Printf("\rCopied: %d bytes", newBytes)
-		atomic.StoreInt64(&pr.lastPrint, newBytes)
+	// Use atomic compare-and-swap to prevent race conditions in progress reporting
+	// Only print if we've read at least 10MB since last print
+	for {
+		lastPrint := atomic.LoadInt64(&pr.lastPrint)
+		if newBytes-lastPrint >= 10*1024*1024 {
+			// Try to update lastPrint atomically
+			if atomic.CompareAndSwapInt64(&pr.lastPrint, lastPrint, newBytes) {
+				// We won the race - print progress
+				fmt.Printf("\rCopied: %d bytes", newBytes)
+				break
+			}
+			// Someone else updated it, retry the loop
+		} else {
+			// Not enough progress yet, no need to print
+			break
+		}
 	}
+
 	return n, err
 }
 

@@ -94,31 +94,27 @@ func Image(cfg Config) (*Result, error) {
 			}
 
 			// We encountered a read error (Bad Sector).
-			// If we didn't read the full block, we need to pad the rest of the expected block size with zeros.
+			// Implement exponential backoff retry with smaller read sizes
 			remaining := cfg.BlockSize - nr
 			if remaining > 0 {
-				res.BadSectors = append(res.BadSectors, BadSector{
-					Offset: res.BytesCopied,
-					Size:   remaining,
-					Error:  err.Error(),
-				})
-				
-				// Zero fill
-				zeroBuf := make([]byte, remaining)
-				nw, wErr := multiWriter.Write(zeroBuf)
-				if wErr != nil {
-					return nil, fmt.Errorf("write error during zero-padding: %w", wErr)
-				}
-				res.BytesCopied += int64(nw)
-				
-				// If the source is a Seeker, try to seek past the bad block.
-				if seeker, ok := cfg.Source.(io.Seeker); ok {
-					if _, seekErr := seeker.Seek(int64(remaining), io.SeekCurrent); seekErr != nil {
-						return res, fmt.Errorf("failed to seek past bad sector: %w", seekErr)
+				recovered := tryRecoverBadSector(cfg.Source, multiWriter, res, remaining, err)
+				if !recovered {
+					// Recovery failed - zero fill the bad region
+					res.BadSectors = append(res.BadSectors, BadSector{
+						Offset: res.BytesCopied,
+						Size:   remaining,
+						Error:  err.Error(),
+					})
+
+					zeroBuf := make([]byte, remaining)
+					nw, wErr := multiWriter.Write(zeroBuf)
+					if wErr != nil {
+						return nil, fmt.Errorf("write error during zero-padding: %w", wErr)
 					}
+					res.BytesCopied += int64(nw)
+
+					res.Errors = append(res.Errors, err)
 				}
-				
-				res.Errors = append(res.Errors, err)
 				continue // Try reading the next block
 			}
 		}
@@ -128,4 +124,85 @@ func Image(cfg Config) (*Result, error) {
 	res.Hash = fmt.Sprintf("%x", hasher.Sum(nil))
 
 	return res, nil
+}
+
+// tryRecoverBadSector attempts to read around bad sectors with exponential backoff
+// Returns true if recovery succeeded, false if the entire region is bad
+func tryRecoverBadSector(source io.Reader, dest io.Writer, res *Result, size int, originalErr error) bool {
+	// Only attempt recovery if source is seekable
+	seeker, ok := source.(io.Seeker)
+	if !ok {
+		return false
+	}
+
+	// Get current position
+	currentPos, err := seeker.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return false
+	}
+
+	// Try reading with exponentially smaller chunks: 4KB, 2KB, 1KB, 512B
+	chunkSizes := []int{4096, 2048, 1024, 512}
+	recovered := 0
+	badOffset := res.BytesCopied
+
+	for recovered < size {
+		readSize := size - recovered
+		success := false
+
+		// Try each chunk size with exponential backoff
+		for _, chunkSize := range chunkSizes {
+			if readSize > chunkSize {
+				readSize = chunkSize
+			}
+
+			// Seek to the position we want to read
+			if _, err := seeker.Seek(currentPos+int64(recovered), io.SeekStart); err != nil {
+				continue
+			}
+
+			// Retry read with smaller chunk
+			buf := make([]byte, readSize)
+			nr, err := source.Read(buf)
+			if nr > 0 {
+				// Successfully read some data - write it
+				if nw, wErr := dest.Write(buf[0:nr]); wErr == nil {
+					recovered += nw
+					res.BytesCopied += int64(nw)
+					success = true
+					break
+				}
+			}
+
+			if err == io.EOF {
+				return recovered > 0
+			}
+
+			// If this chunk size failed, try smaller (loop continues)
+		}
+
+		// If all chunk sizes failed for this position, mark it as bad
+		if !success {
+			// Mark this sector as bad
+			res.BadSectors = append(res.BadSectors, BadSector{
+				Offset: badOffset + int64(recovered),
+				Size:   512, // Assume sector size
+				Error:  originalErr.Error(),
+			})
+
+			// Zero fill this sector
+			zeroBuf := make([]byte, 512)
+			if nw, wErr := dest.Write(zeroBuf); wErr == nil {
+				recovered += nw
+				res.BytesCopied += int64(nw)
+			} else {
+				return false // Write error is fatal
+			}
+		}
+	}
+
+	// Seek to end of recovered region
+	seeker.Seek(currentPos+int64(recovered), io.SeekStart)
+
+	return true
 }

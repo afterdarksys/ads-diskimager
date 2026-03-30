@@ -1,0 +1,9 @@
+{
+  "web": {
+    "bind_address": "0.0.0.0:8080",
+    "storage_path": "/var/lib/diskimager",
+    "max_concurrent_jobs": 4,
+    "enable_cors": true,
+    "allowed_origins": ["*"]
+  }
+}

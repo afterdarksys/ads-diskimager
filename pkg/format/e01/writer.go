@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"encoding/binary"
 	"fmt"
+	"hash/adler32"
 	"io"
 	"os"
 
@@ -19,14 +20,14 @@ const (
 // Writer implements a minimal Expert Witness Format (E01) generator
 // NOTE: A full E01 implementation requires handling Adler32 checksums per chunk,
 // complex section headers (header, volume, table, data, desc), and table offsets.
-// For the sake of this prototype, we will implement the scaffolding but 
+// For the sake of this prototype, we will implement the scaffolding but
 // acknowledge that an industry-compliant EWF generator typically uses libewf.
 type Writer struct {
 	out        io.WriteCloser
 	metadata   imager.Metadata
 	chunkCount int
 	offsetList []int64 // Track chunk offsets
-	
+
 	currentOffset int64
 }
 
@@ -43,17 +44,112 @@ func NewWriter(out io.WriteCloser, appendMode bool, meta imager.Metadata) (*Writ
 			return nil, err
 		}
 	} else {
-		// In a real implementation, we'd need to parse the existing EWF file to recover the chunk table.
-		// For this prototype, if it's a local file, we'll seek to the end and start writing generic chunks.
+		// E01 Resume Support: Parse existing E01 file to recover chunk table
+		// This is critical to avoid corrupting the E01 format structure
 		if f, ok := out.(*os.File); ok {
-			stat, _ := f.Stat()
-			if stat != nil {
-				w.currentOffset = stat.Size()
+			if err := w.parseExistingFile(f); err != nil {
+				out.Close()
+				return nil, fmt.Errorf("failed to parse existing E01 file for resume: %w", err)
 			}
+		} else {
+			out.Close()
+			return nil, fmt.Errorf("E01 resume only supported for local files")
 		}
 	}
 
 	return w, nil
+}
+
+// parseExistingFile parses an existing E01 file to extract chunk table and verify integrity
+func (w *Writer) parseExistingFile(f *os.File) error {
+	// Seek to beginning to parse the file
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek to start: %w", err)
+	}
+
+	// Read and verify magic header
+	magic := make([]byte, 8)
+	if _, err := io.ReadFull(f, magic); err != nil {
+		return fmt.Errorf("failed to read magic header: %w", err)
+	}
+	if string(magic) != magicHeader {
+		return fmt.Errorf("invalid E01 magic header")
+	}
+	w.currentOffset = 8
+
+	// Read header length
+	var headerLen uint32
+	if err := binary.Read(f, binary.LittleEndian, &headerLen); err != nil {
+		return fmt.Errorf("failed to read header length: %w", err)
+	}
+	w.currentOffset += 4
+
+	// Skip header content
+	if _, err := f.Seek(int64(headerLen), io.SeekCurrent); err != nil {
+		return fmt.Errorf("failed to skip header: %w", err)
+	}
+	w.currentOffset += int64(headerLen)
+
+	// Parse chunks until we find the table section
+	for {
+		// Record chunk offset
+		chunkOffset := w.currentOffset
+
+		// Try to read chunk header (4-byte size)
+		var flaggedSize uint32
+		if err := binary.Read(f, binary.LittleEndian, &flaggedSize); err != nil {
+			if err == io.EOF {
+				// Reached end before table section - file might be incomplete
+				break
+			}
+			return fmt.Errorf("failed to read chunk size at offset %d: %w", w.currentOffset, err)
+		}
+
+		// Check if this is the table section marker
+		// Table section starts with "table2" magic
+		currentPos := w.currentOffset
+		if _, err := f.Seek(currentPos, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to seek to check table marker: %w", err)
+		}
+
+		tableMagic := make([]byte, 6)
+		if n, _ := f.Read(tableMagic); n == 6 && string(tableMagic) == "table2" {
+			// Found table section - we've parsed all data chunks
+			// Seek back to before table to allow overwriting
+			if _, err := f.Seek(currentPos, io.SeekStart); err != nil {
+				return fmt.Errorf("failed to seek back: %w", err)
+			}
+			w.currentOffset = currentPos
+
+			// Truncate file at this point to remove old table
+			if err := f.Truncate(w.currentOffset); err != nil {
+				return fmt.Errorf("failed to truncate file: %w", err)
+			}
+
+			break
+		}
+
+		// This is a data chunk - record it and skip
+		w.offsetList = append(w.offsetList, chunkOffset)
+		w.chunkCount++
+
+		// Extract actual compressed size (remove compression flag)
+		compressedSize := flaggedSize & 0x7FFFFFFF
+
+		// Skip compressed data + adler32 checksum (4 bytes)
+		skipSize := int64(compressedSize) + 4 + 4 // 4 for size field we already read + 4 for checksum
+		if _, err := f.Seek(w.currentOffset+skipSize, io.SeekStart); err != nil {
+			return fmt.Errorf("failed to skip chunk data: %w", err)
+		}
+		w.currentOffset += skipSize
+	}
+
+	// Seek to end of file to continue writing
+	if _, err := f.Seek(w.currentOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek to resume position: %w", err)
+	}
+
+	return nil
 }
 
 // writeHeader writes the EWF magic signature and initial header section
@@ -106,6 +202,9 @@ func (w *Writer) Write(p []byte) (n int, err error) {
 		chunk := p[:writeLen]
 		p = p[writeLen:]
 
+		// Calculate Adler32 checksum for uncompressed chunk (forensic integrity)
+		checksum := adler32.Checksum(chunk)
+
 		// Compress chunk
 		var b bytes.Buffer
 		zw := zlib.NewWriter(&b)
@@ -116,25 +215,30 @@ func (w *Writer) Write(p []byte) (n int, err error) {
 		zw.Close()
 		compressedData := b.Bytes()
 
-		// True EWF adds an Adler32 checksum at the end of the uncompressed data.
-		// And a 4-byte chunk header (size + compression flag) + 4 byte checksum.
-		// Here we just write the compressed size, then the data to mimic the block structure.
-		
+		// EWF format: 4-byte flagged size + compressed data + 4-byte Adler32 checksum
 		compressedSize := uint32(len(compressedData))
 		// High bit set to indicate compression in EWF
 		flaggedSize := compressedSize | 0x80000000
 
 		w.offsetList = append(w.offsetList, w.currentOffset)
 
+		// Write flagged size
 		if err := binary.Write(w.out, binary.LittleEndian, flaggedSize); err != nil {
 			return totalWritten, err
 		}
 		w.currentOffset += 4
 
+		// Write compressed data
 		if _, err := w.out.Write(compressedData); err != nil {
 			return totalWritten, err
 		}
 		w.currentOffset += int64(compressedSize)
+
+		// Write Adler32 checksum (improves EWF compliance)
+		if err := binary.Write(w.out, binary.LittleEndian, checksum); err != nil {
+			return totalWritten, err
+		}
+		w.currentOffset += 4
 		
 		w.chunkCount++
 		totalWritten += writeLen

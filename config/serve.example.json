@@ -1,0 +1,10 @@
+{
+  "server": {
+    "bind_address": "0.0.0.0:8443",
+    "storage_path": "/var/lib/diskimager/uploads",
+    "auth_mode": "mtls",
+    "tls_ca": "/etc/diskimager/certs/ca.pem",
+    "tls_cert": "/etc/diskimager/certs/server.pem",
+    "tls_key": "/etc/diskimager/certs/server-key.pem"
+  }
+}

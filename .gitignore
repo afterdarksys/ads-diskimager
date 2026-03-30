@@ -1,0 +1,46 @@
+# Binaries
+diskimager
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+bin/
+dist/
+
+# Log files
+*.log
+
+# Disk images (for testing)
+*.img
+*.e01
+*.vmdk
+*.vhd
+*.raw
+
+# Archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.zip

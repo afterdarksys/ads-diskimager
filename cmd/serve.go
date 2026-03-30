@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -13,40 +14,113 @@ import (
 	"strings"
 	"time"
 
+	"sync"
+
 	"github.com/afterdarksys/diskimager/config"
 	"github.com/afterdarksys/diskimager/imager"
+	"github.com/afterdarksys/diskimager/pkg/daemon"
+	sdnotify "github.com/coreos/go-systemd/v22/daemon"
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
 
 var (
-	configFile string
+	configFile     string
+	daemonMode     bool
+	pidFilePath    string
+	logToSyslog    bool
+	shutdownTimout int
 )
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
 	Short: "Start the diskimager collection server",
+	Long: `Start the forensic disk image collection server with mTLS authentication.
+
+The server accepts disk images from remote clients over HTTPS with mutual TLS
+authentication. All uploads are verified with cryptographic hashes.
+
+Features:
+  - Mutual TLS (mTLS) authentication
+  - Resumable uploads with UUID-based tracking
+  - Cryptographic verification (SHA256)
+  - Forensic metadata capture
+  - Server-side audit logging
+  - Graceful shutdown with in-progress upload handling
+
+Daemon Mode:
+  Use --daemon flag to run as a background service with systemd integration.
+  Supports graceful shutdown on SIGTERM, SIGINT, and SIGHUP signals.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		// Initialize logger
+		var logger daemon.Logger
+		var err error
+
+		if logToSyslog {
+			logger, err = daemon.NewLogger("diskimager-serve", true, daemon.LogLevelInfo)
+			if err != nil {
+				logger = daemon.NewConsoleLogger("diskimager-serve", daemon.LogLevelInfo)
+				log.Printf("Warning: %v", err)
+			}
+		} else {
+			logger = daemon.NewConsoleLogger("diskimager-serve", daemon.LogLevelInfo)
+		}
+		defer logger.Close()
+
+		logger.Info("Starting Diskimager Collection Server")
+
+		// Load configuration
 		cfg, err := config.LoadConfig(configFile)
 		if err != nil {
-			log.Fatalf("Failed to load config: %v", err)
+			logger.Fatal(fmt.Sprintf("Failed to load config: %v", err))
 		}
 
+		// Create storage directory
 		if err := os.MkdirAll(cfg.Server.StoragePath, 0755); err != nil {
-			log.Fatalf("Failed to create storage directory: %v", err)
+			logger.Fatal(fmt.Sprintf("Failed to create storage directory: %v", err))
+		}
+
+		// Create PID file if daemon mode
+		var pidFile *daemon.PIDFile
+		if daemonMode {
+			if pidFilePath == "" {
+				pidFilePath = daemon.GetDefaultPIDPath("diskimager-serve")
+			}
+			pidFile, err = daemon.CreatePIDFile(pidFilePath)
+			if err != nil {
+				logger.Fatal(fmt.Sprintf("Failed to create PID file: %v", err))
+			}
+			logger.Info(fmt.Sprintf("Created PID file: %s (PID: %d)", pidFilePath, pidFile.PID))
+			defer daemon.RemovePIDFile(pidFilePath)
+		}
+
+		// Track active uploads for graceful shutdown
+		activeUploads := &activeUploadTracker{
+			count: 0,
+			mu:    &sync.Mutex{},
 		}
 
 		mux := http.NewServeMux()
 		mux.HandleFunc("/upload", func(w http.ResponseWriter, r *http.Request) {
+			activeUploads.increment()
+			defer activeUploads.decrement()
 			clientID := "unknown"
 			if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 				clientID = r.TLS.PeerCertificates[0].Subject.CommonName
 			}
 
-			// We need a stable identifier if we're resuming. Let's use an X-Upload-ID header,
-			// or default to generating a new timestamp-based one.
+			// Use UUID for upload ID to prevent collisions
+			// Client can provide X-Upload-ID header for resume, otherwise generate new UUID
 			uploadID := r.Header.Get("X-Upload-ID")
 			if uploadID == "" {
-				uploadID = fmt.Sprintf("%s_%s", clientID, time.Now().Format("20060102_150405"))
+				// Generate UUID v4 for guaranteed uniqueness
+				newUUID, err := uuid.NewRandom()
+				if err != nil {
+					http.Error(w, "Failed to generate upload ID", http.StatusInternalServerError)
+					log.Printf("UUID generation failed: %v", err)
+					return
+				}
+				uploadID = fmt.Sprintf("%s_%s", clientID, newUUID.String())
 			}
 
 			filename := uploadID + ".img"
@@ -150,7 +224,7 @@ var serveCmd = &cobra.Command{
 			}
 
 			logBytes, _ := json.MarshalIndent(logEntry, "", "  ")
-			os.WriteFile(logFile, logBytes, 0644)
+			os.WriteFile(logFile, logBytes, 0600) // Secure permissions
 
 			if err != nil {
 				log.Printf("Error receiving stream: %v", err)
@@ -184,12 +258,111 @@ var serveCmd = &cobra.Command{
 			TLSConfig: tlsConfig,
 		}
 
-		fmt.Printf("Server listening on %s (mTLS enabled)\n", cfg.Server.BindAddress)
-		log.Fatal(server.ListenAndServeTLS(cfg.Server.TLSCert, cfg.Server.TLSKey))
+		// Setup signal handling for graceful shutdown
+		signalHandler := daemon.NewSignalHandler(
+			&httpServerAdapter{server: server, activeUploads: activeUploads, logger: logger},
+			time.Duration(shutdownTimout)*time.Second,
+			logger,
+		)
+		if pidFilePath != "" {
+			signalHandler.SetPIDFile(pidFilePath)
+		}
+		ctx := signalHandler.SetupSignalHandler()
+
+		// Start server in goroutine
+		serverErr := make(chan error, 1)
+		go func() {
+			logger.Info(fmt.Sprintf("Server listening on %s (mTLS enabled)", cfg.Server.BindAddress))
+			logger.Info(fmt.Sprintf("Storage path: %s", cfg.Server.StoragePath))
+
+			// Notify systemd that we're ready (only works when running under systemd)
+			if daemonMode {
+				sdnotify.SdNotify(false, sdnotify.SdNotifyReady)
+				logger.Info("Sent READY signal to systemd")
+			}
+
+			if err := server.ListenAndServeTLS(cfg.Server.TLSCert, cfg.Server.TLSKey); err != nil && err != http.ErrServerClosed {
+				serverErr <- err
+			}
+		}()
+
+		// Wait for shutdown signal or error
+		select {
+		case <-ctx.Done():
+			logger.Info("Shutdown signal received")
+		case err := <-serverErr:
+			logger.Error(fmt.Sprintf("Server error: %v", err))
+		}
+
+		logger.Info("Server stopped")
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(serveCmd)
 	serveCmd.Flags().StringVar(&configFile, "config", "config.json", "Path to configuration file")
+	serveCmd.Flags().BoolVar(&daemonMode, "daemon", false, "Run as daemon (enables systemd integration)")
+	serveCmd.Flags().StringVar(&pidFilePath, "pid-file", "", "Path to PID file (default: /var/run/diskimager-serve.pid)")
+	serveCmd.Flags().BoolVar(&logToSyslog, "syslog", false, "Log to syslog/journald instead of stderr")
+	serveCmd.Flags().IntVar(&shutdownTimout, "shutdown-timeout", 30, "Graceful shutdown timeout in seconds")
+}
+
+// activeUploadTracker tracks the number of active uploads
+type activeUploadTracker struct {
+	count int
+	mu    *sync.Mutex
+}
+
+func (a *activeUploadTracker) increment() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.count++
+}
+
+func (a *activeUploadTracker) decrement() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.count--
+}
+
+func (a *activeUploadTracker) getCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.count
+}
+
+// httpServerAdapter adapts http.Server to daemon.DaemonServer interface
+type httpServerAdapter struct {
+	server        *http.Server
+	activeUploads *activeUploadTracker
+	logger        daemon.Logger
+}
+
+func (h *httpServerAdapter) Shutdown(ctx context.Context) error {
+	// Notify systemd we're stopping
+	sdnotify.SdNotify(false, sdnotify.SdNotifyStopping)
+	h.logger.Info("Initiating graceful shutdown...")
+
+	// Wait for active uploads to complete or timeout
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			activeCount := h.activeUploads.getCount()
+			if activeCount > 0 {
+				h.logger.Warn(fmt.Sprintf("Shutdown timeout reached with %d active uploads", activeCount))
+			}
+			// Force shutdown
+			return h.server.Shutdown(context.Background())
+		case <-ticker.C:
+			activeCount := h.activeUploads.getCount()
+			if activeCount == 0 {
+				h.logger.Info("All uploads completed, shutting down")
+				return h.server.Shutdown(ctx)
+			}
+			h.logger.Info(fmt.Sprintf("Waiting for %d active uploads to complete...", activeCount))
+		}
+	}
 }
