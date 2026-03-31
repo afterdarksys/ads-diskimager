@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Diskimager Block Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1e1e1e;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        #app {
+            display: grid;
+            grid-template-columns: 250px 1fr 300px;
+            grid-template-rows: 60px 1fr 40px;
+            height: 100vh;
+            gap: 0;
+        }
+
+        header {
+            grid-column: 1 / -1;
+            background: #2d2d2d;
+            padding: 15px 20px;
+            border-bottom: 2px solid #007acc;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        header h1 {
+            font-size: 24px;
+            color: #007acc;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        header .stats {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+        }
+
+        header .stat {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+        }
+
+        header .stat-label {
+            color: #888;
+            font-size: 11px;
+        }
+
+        header .stat-value {
+            color: #fff;
+            font-weight: bold;
+        }
+
+        #sidebar {
+            background: #252525;
+            padding: 15px;
+            overflow-y: auto;
+            border-right: 1px solid #3a3a3a;
+        }
+
+        #main-canvas-container {
+            position: relative;
+            background: #1a1a1a;
+            overflow: hidden;
+        }
+
+        #canvas {
+            display: block;
+            cursor: crosshair;
+        }
+
+        #details-panel {
+            background: #252525;
+            padding: 15px;
+            overflow-y: auto;
+            border-left: 1px solid #3a3a3a;
+        }
+
+        footer {
+            grid-column: 1 / -1;
+            background: #2d2d2d;
+            padding: 10px 20px;
+            border-top: 1px solid #3a3a3a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+        }
+
+        .section {
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: #007acc;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 3px;
+            border: 1px solid #3a3a3a;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 5px;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            padding: 8px;
+            background: #1e1e1e;
+            border: 1px solid #3a3a3a;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-size: 12px;
+        }
+
+        button {
+            padding: 8px 16px;
+            background: #007acc;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #005a9e;
+        }
+
+        button:active {
+            background: #004578;
+        }
+
+        button.secondary {
+            background: #3a3a3a;
+        }
+
+        button.secondary:hover {
+            background: #4a4a4a;
+        }
+
+        .info-item {
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        .info-label {
+            color: #888;
+            font-size: 11px;
+        }
+
+        .info-value {
+            color: #e0e0e0;
+            font-weight: bold;
+        }
+
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            pointer-events: none;
+            z-index: 1000;
+            display: none;
+            border: 1px solid #007acc;
+        }
+
+        .loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 18px;
+            color: #007acc;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+
+        .zoom-controls {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+
+        .zoom-controls button {
+            padding: 4px 12px;
+            font-size: 16px;
+        }
+
+        .zoom-level {
+            font-size: 12px;
+            color: #888;
+            min-width: 60px;
+            text-align: center;
+        }
+
+        #search-results {
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+
+        .search-result-item {
+            padding: 8px;
+            background: #1e1e1e;
+            margin-bottom: 5px;
+            border-radius: 3px;
+            cursor: pointer;
+            border-left: 3px solid transparent;
+            font-size: 11px;
+        }
+
+        .search-result-item:hover {
+            background: #2d2d2d;
+            border-left-color: #007acc;
+        }
+
+        .no-selection {
+            color: #666;
+            font-style: italic;
+            font-size: 12px;
+            text-align: center;
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <header>
+            <h1>
+                <span>🔍</span>
+                Disk Block Editor
+            </h1>
+            <div class="stats">
+                <div class="stat">
+                    <span class="stat-label">Total Blocks</span>
+                    <span class="stat-value" id="total-blocks">0</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Size</span>
+                    <span class="stat-value" id="total-size">0 B</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-label">Utilization</span>
+                    <span class="stat-value" id="utilization">0%</span>
+                </div>
+            </div>
+        </header>
+
+        <div id="sidebar">
+            <div class="section">
+                <div class="section-title">Legend</div>
+                <div id="legend"></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">Search & Filter</div>
+                <div class="control-group">
+                    <label>File Name</label>
+                    <input type="text" id="search-filename" placeholder="Search by filename...">
+                </div>
+                <div class="control-group">
+                    <label>Block Type</label>
+                    <select id="filter-type">
+                        <option value="">All Types</option>
+                        <option value="image">Image</option>
+                        <option value="video">Video</option>
+                        <option value="audio">Audio</option>
+                        <option value="document">Document</option>
+                        <option value="executable">Executable</option>
+                        <option value="archive">Archive</option>
+                        <option value="encrypted">Encrypted</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>Block Status</label>
+                    <select id="filter-status">
+                        <option value="">All Status</option>
+                        <option value="allocated">Allocated</option>
+                        <option value="unallocated">Unallocated</option>
+                        <option value="deleted">Deleted</option>
+                        <option value="system">System</option>
+                    </select>
+                </div>
+                <div class="controls">
+                    <button onclick="applySearch()">Search</button>
+                    <button class="secondary" onclick="clearSearch()">Clear</button>
+                </div>
+                <div id="search-results"></div>
+            </div>
+
+            <div class="section">
+                <div class="section-title">View Controls</div>
+                <div class="zoom-controls">
+                    <button onclick="zoomOut()">−</button>
+                    <span class="zoom-level" id="zoom-level">100%</span>
+                    <button onclick="zoomIn()">+</button>
+                </div>
+                <div class="controls">
+                    <button onclick="resetView()">Reset View</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="main-canvas-container">
+            <canvas id="canvas"></canvas>
+            <div id="tooltip"></div>
+            <div class="loading" id="loading">Loading disk map...</div>
+        </div>
+
+        <div id="details-panel">
+            <div class="section">
+                <div class="section-title">Block Details</div>
+                <div id="block-details">
+                    <div class="no-selection">Click a block to view details</div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <div id="disk-info">No disk loaded</div>
+            <div id="cursor-info">Position: -</div>
+        </footer>
+    </div>
+
+    <script>
+        // Global state
+        let diskMap = null;
+        let blocks = [];
+        let selectedBlock = null;
+        let hoveredBlock = null;
+        let colorScheme = {};
+        let zoom = 1.0;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const tooltip = document.getElementById('tooltip');
+        const blockDetailsEl = document.getElementById('block-details');
+
+        // Configuration
+        const BLOCK_PIXEL_SIZE = 4; // Each block is 4x4 pixels
+        const BLOCKS_PER_ROW = 256; // 256 blocks per row
+
+        // Initialize
+        async function init() {
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('click', handleClick);
+            canvas.addEventListener('mouseout', () => {
+                tooltip.style.display = 'none';
+            });
+
+            // Pan support
+            canvas.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+            });
+
+            canvas.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+
+            canvas.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const dx = e.clientX - lastMouseX;
+                    const dy = e.clientY - lastMouseY;
+                    offsetX += dx;
+                    offsetY += dy;
+                    lastMouseX = e.clientX;
+                    lastMouseY = e.clientY;
+                    render();
+                }
+            });
+
+            // Zoom with mouse wheel
+            canvas.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                const delta = e.deltaY > 0 ? 0.9 : 1.1;
+                zoom *= delta;
+                zoom = Math.max(0.1, Math.min(10, zoom));
+                document.getElementById('zoom-level').textContent = Math.round(zoom * 100) + '%';
+                render();
+            });
+
+            await loadDiskMap();
+        }
+
+        function resizeCanvas() {
+            const container = document.getElementById('main-canvas-container');
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            if (diskMap) render();
+        }
+
+        async function loadDiskMap() {
+            try {
+                const response = await fetch('/api/diskmap');
+                diskMap = await response.json();
+
+                updateHeader();
+                createLegend();
+
+                document.getElementById('disk-info').textContent =
+                    `Image: ${diskMap.image_path.split('/').pop()} | Blocks: ${diskMap.total_blocks.toLocaleString()}`;
+
+                await loadBlocks();
+                document.getElementById('loading').style.display = 'none';
+            } catch (error) {
+                console.error('Failed to load disk map:', error);
+                document.getElementById('loading').textContent = 'Error loading disk map';
+            }
+        }
+
+        async function loadBlocks() {
+            try {
+                const response = await fetch(`/api/blocks?start=0&end=${diskMap.total_blocks}`);
+                const data = await response.json();
+                blocks = data.blocks;
+                render();
+            } catch (error) {
+                console.error('Failed to load blocks:', error);
+            }
+        }
+
+        function updateHeader() {
+            document.getElementById('total-blocks').textContent = diskMap.total_blocks.toLocaleString();
+            document.getElementById('total-size').textContent = formatBytes(diskMap.total_size);
+            document.getElementById('utilization').textContent =
+                diskMap.statistics.utilization.toFixed(1) + '%';
+        }
+
+        function createLegend() {
+            colorScheme = diskMap.color_scheme;
+            const legendEl = document.getElementById('legend');
+            const items = [
+                { label: 'Allocated', color: colorScheme.allocated },
+                { label: 'Unallocated', color: colorScheme.unallocated },
+                { label: 'Deleted', color: colorScheme.deleted },
+                { label: 'System', color: colorScheme.system },
+                { label: 'Image', color: colorScheme.image },
+                { label: 'Video', color: colorScheme.video },
+                { label: 'Audio', color: colorScheme.audio },
+                { label: 'Document', color: colorScheme.document },
+                { label: 'Executable', color: colorScheme.executable },
+                { label: 'Archive', color: colorScheme.archive },
+                { label: 'Encrypted', color: colorScheme.encrypted },
+            ];
+
+            legendEl.innerHTML = items.map(item => `
+                <div class="legend-item">
+                    <div class="legend-color" style="background: ${item.color}"></div>
+                    <span>${item.label}</span>
+                </div>
+            `).join('');
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!blocks || blocks.length === 0) return;
+
+            const blockSize = BLOCK_PIXEL_SIZE * zoom;
+            const blocksPerRow = BLOCKS_PER_ROW;
+
+            for (let i = 0; i < blocks.length; i++) {
+                const block = blocks[i];
+                const row = Math.floor(i / blocksPerRow);
+                const col = i % blocksPerRow;
+
+                const x = col * blockSize + offsetX;
+                const y = row * blockSize + offsetY;
+
+                // Skip if out of view
+                if (x + blockSize < 0 || x > canvas.width || y + blockSize < 0 || y > canvas.height) {
+                    continue;
+                }
+
+                ctx.fillStyle = getBlockColor(block);
+                ctx.fillRect(x, y, blockSize, blockSize);
+
+                // Highlight selected block
+                if (selectedBlock && block.index === selectedBlock.index) {
+                    ctx.strokeStyle = '#fff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(x, y, blockSize, blockSize);
+                }
+            }
+        }
+
+        function getBlockColor(block) {
+            if (block.is_zero) return '#000000';
+
+            // Priority: type > status
+            if (block.type && block.type !== 'unknown') {
+                return colorScheme[block.type] || colorScheme.allocated;
+            }
+
+            return colorScheme[block.status] || '#666666';
+        }
+
+        function handleMouseMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const blockSize = BLOCK_PIXEL_SIZE * zoom;
+            const col = Math.floor((mouseX - offsetX) / blockSize);
+            const row = Math.floor((mouseY - offsetY) / blockSize);
+            const index = row * BLOCKS_PER_ROW + col;
+
+            if (index >= 0 && index < blocks.length) {
+                hoveredBlock = blocks[index];
+                showTooltip(e.clientX, e.clientY, hoveredBlock);
+
+                document.getElementById('cursor-info').textContent =
+                    `Block: ${hoveredBlock.index} | Offset: ${formatBytes(hoveredBlock.index * diskMap.block_size)}`;
+            } else {
+                tooltip.style.display = 'none';
+                hoveredBlock = null;
+            }
+        }
+
+        function handleClick(e) {
+            if (hoveredBlock) {
+                selectedBlock = hoveredBlock;
+                loadBlockDetails(selectedBlock);
+                render();
+            }
+        }
+
+        function showTooltip(x, y, block) {
+            tooltip.style.display = 'block';
+            tooltip.style.left = (x + 15) + 'px';
+            tooltip.style.top = (y + 15) + 'px';
+
+            tooltip.innerHTML = `
+                <strong>Block ${block.index}</strong><br>
+                Type: ${block.type}<br>
+                Status: ${block.status}<br>
+                ${block.file_name ? `File: ${block.file_name}<br>` : ''}
+                ${block.entropy ? `Entropy: ${block.entropy.toFixed(2)}<br>` : ''}
+            `;
+        }
+
+        async function loadBlockDetails(block) {
+            try {
+                const response = await fetch(`/api/block/${block.index}`);
+                const details = await response.json();
+
+                blockDetailsEl.innerHTML = `
+                    <div class="info-item">
+                        <div class="info-label">Block Index</div>
+                        <div class="info-value">${details.index}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Offset</div>
+                        <div class="info-value">${formatBytes(details.offset)}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Size</div>
+                        <div class="info-value">${details.size} bytes</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Status</div>
+                        <div class="info-value">${details.status}</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">Type</div>
+                        <div class="info-value">${details.type}</div>
+                    </div>
+                    ${details.file_name ? `
+                        <div class="info-item">
+                            <div class="info-label">File</div>
+                            <div class="info-value">${details.file_name}</div>
+                        </div>
+                    ` : ''}
+                    ${details.signature ? `
+                        <div class="info-item">
+                            <div class="info-label">Signature</div>
+                            <div class="info-value">${details.signature}</div>
+                        </div>
+                    ` : ''}
+                    ${details.entropy ? `
+                        <div class="info-item">
+                            <div class="info-label">Entropy</div>
+                            <div class="info-value">${details.entropy.toFixed(3)} bits</div>
+                        </div>
+                    ` : ''}
+                    ${details.is_zero ? `
+                        <div class="info-item">
+                            <div class="info-label">Zero Block</div>
+                            <div class="info-value">Yes</div>
+                        </div>
+                    ` : ''}
+                    ${details.compressed ? `
+                        <div class="info-item">
+                            <div class="info-label">Compressed</div>
+                            <div class="info-value">Likely</div>
+                        </div>
+                    ` : ''}
+                    ${details.encrypted ? `
+                        <div class="info-item">
+                            <div class="info-label">Encrypted</div>
+                            <div class="info-value">Likely</div>
+                        </div>
+                    ` : ''}
+                `;
+            } catch (error) {
+                console.error('Failed to load block details:', error);
+            }
+        }
+
+        async function applySearch() {
+            // Implement search functionality
+            const filename = document.getElementById('search-filename').value;
+            const type = document.getElementById('filter-type').value;
+            const status = document.getElementById('filter-status').value;
+
+            const query = {};
+            if (filename) query.file_name = filename;
+            if (type) query.type = type;
+            if (status) query.status = status;
+
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(query)
+                });
+                const data = await response.json();
+
+                displaySearchResults(data.results);
+            } catch (error) {
+                console.error('Search failed:', error);
+            }
+        }
+
+        function displaySearchResults(results) {
+            const resultsEl = document.getElementById('search-results');
+            if (!results || results.length === 0) {
+                resultsEl.innerHTML = '<div class="no-selection">No results found</div>';
+                return;
+            }
+
+            resultsEl.innerHTML = results.slice(0, 50).map(block => `
+                <div class="search-result-item" onclick="jumpToBlock(${block.index})">
+                    Block ${block.index} - ${block.type} (${block.status})
+                </div>
+            `).join('');
+        }
+
+        function jumpToBlock(index) {
+            // Center the view on the selected block
+            const blockSize = BLOCK_PIXEL_SIZE * zoom;
+            const col = index % BLOCKS_PER_ROW;
+            const row = Math.floor(index / BLOCKS_PER_ROW);
+
+            offsetX = canvas.width / 2 - col * blockSize;
+            offsetY = canvas.height / 2 - row * blockSize;
+
+            selectedBlock = blocks[index];
+            loadBlockDetails(selectedBlock);
+            render();
+        }
+
+        function clearSearch() {
+            document.getElementById('search-filename').value = '';
+            document.getElementById('filter-type').value = '';
+            document.getElementById('filter-status').value = '';
+            document.getElementById('search-results').innerHTML = '';
+        }
+
+        function zoomIn() {
+            zoom *= 1.2;
+            zoom = Math.min(10, zoom);
+            document.getElementById('zoom-level').textContent = Math.round(zoom * 100) + '%';
+            render();
+        }
+
+        function zoomOut() {
+            zoom *= 0.8;
+            zoom = Math.max(0.1, zoom);
+            document.getElementById('zoom-level').textContent = Math.round(zoom * 100) + '%';
+            render();
+        }
+
+        function resetView() {
+            zoom = 1.0;
+            offsetX = 0;
+            offsetY = 0;
+            document.getElementById('zoom-level').textContent = '100%';
+            render();
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Start the application
+        init();
+    </script>
+</body>
+</html>

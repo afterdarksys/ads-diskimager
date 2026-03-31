@@ -23,6 +23,7 @@ A professional forensics-grade disk imaging and analysis tool written in Go, sup
 - 🗜️ **Compression Support**: Inline gzip/zstd compression (30-70% space savings)
 - 💾 **Sparse File Support**: Skip zero blocks (50-95% savings on sparse disks)
 - 🌐 **RESTful API Server**: Asynchronous job processing with real-time WebSocket progress
+- 🔍 **Interactive Disk Block Editor**: Web-based visual block map editor with click-to-explore
 
 ### Storage Backends
 - **Local filesystem**: Traditional forensic imaging
@@ -111,6 +112,7 @@ export MINIO_SECRET_KEY="your-secret-key"
 
 ## Documentation
 
+- **[docs/DISK_EDITOR.md](docs/DISK_EDITOR.md)** - Interactive disk block editor guide
 - **[docs/API_SERVER.md](docs/API_SERVER.md)** - Complete API server guide with examples
 - **[MINIO.md](MINIO.md)** - Complete guide for MinIO and darkstorage.io
 - **[ENHANCEME.md](ENHANCEME.md)** - Roadmap of future enhancements
@@ -219,6 +221,39 @@ Start the forensic imaging API server for programmatic access and remote managem
 - OpenAPI 3.0 specification
 
 **See:** [docs/API_SERVER.md](docs/API_SERVER.md) for complete documentation
+
+### `disk-editor` - Interactive Block Visualizer
+
+Visualize and explore disk images with an interactive web-based block editor.
+
+```bash
+# Launch interactive disk block editor
+./diskimager disk-editor --in /evidence/disk001.img
+
+# Quick analysis of large disk (sample first 100K blocks)
+./diskimager disk-editor --in /dev/sda --max-blocks 100000
+
+# Full analysis with hashing
+./diskimager disk-editor --in image.dd --compute-hash
+```
+
+**Features:**
+- Visual block map with 256 blocks per row, colored by type
+- Interactive hover tooltips and click-to-select
+- Search and filter by file name, type, or status
+- File signature detection (PNG, JPEG, PDF, ZIP, EXE, etc.)
+- Entropy analysis for compression/encryption detection
+- Zoom and pan for detailed inspection
+- Real-time statistics and utilization metrics
+
+**Perfect for:**
+- Forensic investigation and triage
+- Understanding disk structure and fragmentation
+- Identifying file types and locations
+- Finding deleted or unallocated data
+- Visual disk utilization analysis
+
+**See:** [docs/DISK_EDITOR.md](docs/DISK_EDITOR.md) for complete documentation
 
 ### `disktool` - Advanced Disk Tools
 
