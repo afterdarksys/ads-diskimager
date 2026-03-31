@@ -1,0 +1,659 @@
+openapi: 3.0.3
+info:
+  title: DiskImager Forensic API
+  description: |
+    Enterprise API for forensic disk imaging, verification, and analysis.
+
+    Features:
+    - Asynchronous job processing with real-time progress
+    - Multi-source support (disk, VM, cloud storage)
+    - Compression, encryption, and multi-hash verification
+    - Block-level hashing and sparse detection
+    - Chain of custody metadata
+  version: 1.0.0
+  contact:
+    name: AfterDark Systems
+    url: https://github.com/afterdarksys/diskimager
+
+servers:
+  - url: https://api.forensics.local/api/v1
+    description: Production server
+  - url: http://localhost:8080/api/v1
+    description: Development server
+
+security:
+  - ApiKeyAuth: []
+  - mTLS: []
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check API server health and readiness
+      security: []
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /version:
+    get:
+      summary: Get version info
+      description: Returns API and diskimager version information
+      security: []
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+
+  /jobs/image:
+    post:
+      summary: Create imaging job
+      description: Create a new forensic imaging job with specified source, destination, and options
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateImageJobRequest'
+      responses:
+        '201':
+          description: Job created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /jobs/{jobId}:
+    get:
+      summary: Get job status
+      description: Retrieve current status and details of an imaging job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      summary: Cancel job
+      description: Cancel a running or queued job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job cancelled successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Job already completed
+
+  /jobs:
+    get:
+      summary: List jobs
+      description: List all jobs with optional filtering
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, completed, failed, cancelled]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        '200':
+          description: List of jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JobResponse'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+
+  /jobs/{jobId}/logs:
+    get:
+      summary: Get job logs
+      description: Retrieve audit logs for a specific job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobLogs'
+
+  /jobs/{jobId}/artifacts:
+    get:
+      summary: Get job artifacts
+      description: List downloadable artifacts (images, hashes, reports)
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job artifacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Artifact'
+
+  /jobs/{jobId}/artifacts/{artifactId}:
+    get:
+      summary: Download artifact
+      description: Download a specific job artifact
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Artifact file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+
+  /verify:
+    post:
+      summary: Verify image
+      description: Verify image integrity by computing and comparing hashes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyRequest'
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerifyResponse'
+
+  /sources:
+    get:
+      summary: List available source types
+      description: Get list of supported source types for imaging
+      responses:
+        '200':
+          description: Available source types
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sources:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SourceType'
+
+  /formats:
+    get:
+      summary: List available output formats
+      description: Get list of supported output formats
+      responses:
+        '200':
+          description: Available output formats
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  formats:
+                    type: array
+                    items:
+                      type: string
+                      enum: [raw, e01, aff4, encrypted, compressed]
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    mTLS:
+      type: mutualTLS
+
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique job identifier
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+        timestamp:
+          type: string
+          format: date-time
+        version:
+          type: string
+        uptime:
+          type: integer
+          description: Uptime in seconds
+
+    VersionResponse:
+      type: object
+      properties:
+        api_version:
+          type: string
+        diskimager_version:
+          type: string
+        build_date:
+          type: string
+        git_commit:
+          type: string
+
+    CreateImageJobRequest:
+      type: object
+      required:
+        - source
+        - destination
+      properties:
+        source:
+          $ref: '#/components/schemas/Source'
+        destination:
+          $ref: '#/components/schemas/Destination'
+        options:
+          $ref: '#/components/schemas/ImageOptions'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    Source:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [disk, file, s3, azure-blob, gcs, http, vm-vmdk, vm-vhd]
+        # Type-specific fields (discriminated union)
+        path:
+          type: string
+          description: For disk/file types
+        device:
+          type: string
+          description: For disk type (e.g. /dev/sda)
+        bucket:
+          type: string
+          description: For S3/GCS
+        container:
+          type: string
+          description: For Azure Blob
+        key:
+          type: string
+          description: Object key for cloud storage
+        url:
+          type: string
+          description: For HTTP source
+        credentials:
+          type: object
+          additionalProperties: true
+          description: Cloud credentials if needed
+
+    Destination:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          enum: [file, s3, azure-blob, gcs, stream]
+        path:
+          type: string
+        bucket:
+          type: string
+        container:
+          type: string
+        key:
+          type: string
+        format:
+          type: string
+          enum: [raw, e01, encrypted, compressed]
+          default: raw
+
+    ImageOptions:
+      type: object
+      properties:
+        block_size:
+          type: integer
+          default: 65536
+          description: Block size in bytes
+        compression:
+          type: string
+          enum: [none, gzip, zstd, lz4]
+          default: none
+        compression_level:
+          type: integer
+          minimum: 0
+          maximum: 9
+          default: 6
+        encryption:
+          type: boolean
+          default: false
+        encryption_key:
+          type: string
+          format: base64
+          description: Base64-encoded encryption key
+        hash_algorithms:
+          type: array
+          items:
+            type: string
+            enum: [md5, sha1, sha256, sha512]
+          default: [sha256]
+        block_hash:
+          type: boolean
+          default: false
+        block_hash_size:
+          type: integer
+          default: 1048576
+          description: Block size for block-level hashing
+        detect_sparse:
+          type: boolean
+          default: false
+        rate_limit:
+          type: integer
+          description: Rate limit in bytes per second (0 = unlimited)
+        chunk_size:
+          type: integer
+          description: Auto-split into chunks of this size (0 = no splitting)
+
+    Metadata:
+      type: object
+      properties:
+        case_number:
+          type: string
+        evidence_number:
+          type: string
+        examiner:
+          type: string
+        description:
+          type: string
+        notes:
+          type: string
+        custom:
+          type: object
+          additionalProperties: true
+          description: Custom metadata fields
+
+    JobResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, completed, failed, cancelled]
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        source:
+          $ref: '#/components/schemas/Source'
+        destination:
+          $ref: '#/components/schemas/Destination'
+        options:
+          $ref: '#/components/schemas/ImageOptions'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+        progress:
+          $ref: '#/components/schemas/JobProgress'
+        result:
+          $ref: '#/components/schemas/JobResult'
+        error:
+          type: string
+        stream_url:
+          type: string
+          description: WebSocket URL for real-time progress
+          example: wss://api.forensics.local/api/v1/jobs/abc123/stream
+
+    JobProgress:
+      type: object
+      properties:
+        phase:
+          type: string
+          enum: [initializing, reading, hashing, compressing, encrypting, writing, verifying, completed]
+        bytes_processed:
+          type: integer
+          format: int64
+        total_bytes:
+          type: integer
+          format: int64
+        percentage:
+          type: number
+          format: float
+        speed:
+          type: integer
+          format: int64
+          description: Bytes per second
+        eta:
+          type: integer
+          description: Estimated seconds remaining
+
+    JobResult:
+      type: object
+      properties:
+        bytes_copied:
+          type: integer
+          format: int64
+        hashes:
+          type: object
+          additionalProperties:
+            type: string
+          example:
+            sha256: "a3f5d8e9c2b1f4a6e7c9d2b3f5a6e9c2..."
+            sha512: "b4c6e1f2d3a5b7c8e9f1a2b3c4d5e6f7..."
+        bad_sectors:
+          type: array
+          items:
+            type: object
+            properties:
+              offset:
+                type: integer
+                format: int64
+              size:
+                type: integer
+              error:
+                type: string
+        duration:
+          type: integer
+          description: Duration in seconds
+        artifacts:
+          type: array
+          items:
+            type: string
+          description: URLs or IDs of generated artifacts
+
+    JobLogs:
+      type: object
+      properties:
+        job_id:
+          type: string
+        logs:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              level:
+                type: string
+                enum: [debug, info, warn, error]
+              message:
+                type: string
+              details:
+                type: object
+
+    Artifact:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [image, hash, block-hash-manifest, sparse-map, audit-log, report]
+        name:
+          type: string
+        size:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        download_url:
+          type: string
+
+    VerifyRequest:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          $ref: '#/components/schemas/Source'
+        expected_hash:
+          type: string
+        hash_algorithm:
+          type: string
+          enum: [md5, sha1, sha256, sha512]
+          default: sha256
+        block_hash_manifest:
+          type: string
+          description: URL or path to block hash manifest for block-level verification
+
+    VerifyResponse:
+      type: object
+      properties:
+        verified:
+          type: boolean
+        computed_hash:
+          type: string
+        expected_hash:
+          type: string
+        algorithm:
+          type: string
+        bytes_verified:
+          type: integer
+          format: int64
+        duration:
+          type: integer
+        block_verification:
+          type: object
+          properties:
+            total_blocks:
+              type: integer
+            verified_blocks:
+              type: integer
+            corrupted_blocks:
+              type: array
+              items:
+                type: integer
+
+    SourceType:
+      type: object
+      properties:
+        type:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        capabilities:
+          type: object
+          properties:
+            seekable:
+              type: boolean
+            size_known:
+              type: boolean
+            resumable:
+              type: boolean
+            streaming:
+              type: boolean
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

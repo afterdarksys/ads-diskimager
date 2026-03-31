@@ -10,26 +10,32 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/afterdarksys/diskimager/imager"
+	"github.com/afterdarksys/diskimager/pkg/compression"
 	"github.com/afterdarksys/diskimager/pkg/format/e01"
 	"github.com/afterdarksys/diskimager/pkg/format/raw"
 	"github.com/afterdarksys/diskimager/pkg/geometry"
+	customhash "github.com/afterdarksys/diskimager/pkg/hash"
 	"github.com/afterdarksys/diskimager/pkg/smart"
+	"github.com/afterdarksys/diskimager/pkg/sparse"
 	"github.com/afterdarksys/diskimager/pkg/storage"
+	"github.com/afterdarksys/diskimager/pkg/throttle"
 	"github.com/spf13/cobra"
 )
 
 var (
-	inputFile  string
-	outputFile string
-	blockSize  int
-	hashAlgo   string
-	imgFormat  string
-	resume     bool
+	inputFile      string
+	outputFile     string
+	blockSize      int
+	hashAlgo       string
+	hashAlgorithms []string // Multiple hash algorithms
+	imgFormat      string
+	resume         bool
 
 	// Metadata flags
 	caseNum  string
@@ -42,6 +48,12 @@ var (
 	collectSMART     bool
 	verifyWriteBlock bool
 	collectGeometry  bool
+
+	// Performance flags
+	bandwidthLimit   string // e.g., "50M", "1G"
+	compressionAlgo  string // "none", "gzip", "zstd"
+	compressionLevel int    // 1-9
+	sparseMode       bool   // Enable sparse file support
 )
 
 // ResumeMetadata stores state for resuming interrupted imaging sessions
@@ -165,31 +177,50 @@ var imageCmd = &cobra.Command{
 		}
 		defer in.Close()
 
+		// Determine if using multi-hash or single hash
 		var hasher hash.Hash
-		switch hashAlgo {
-		case "md5":
-			hasher = md5.New()
-		case "sha1":
-			hasher = sha1.New()
-		case "sha256":
-			hasher = sha256.New()
-		}
+		var multiHasher *customhash.MultiHasher
+		usingMultiHash := len(hashAlgorithms) > 0
 
-		// Restore hash state if available, otherwise re-hash existing data
-		if resume && existingBytesCopied > 0 {
-			if resumeMeta != nil && len(resumeMeta.HashState) > 0 {
-				// TODO: Go's standard hash interfaces don't support state serialization
-				// For now, we must re-hash. A future enhancement would use a custom
-				// hash wrapper that supports marshaling/unmarshaling state.
-				fmt.Printf("Note: Hash state restoration not yet implemented, re-hashing %d bytes...\n", existingBytesCopied)
-				if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
+		if usingMultiHash {
+			// Multi-hash mode
+			multiHasher = customhash.NewMultiHasher(hashAlgorithms...)
+			fmt.Printf("Using parallel multi-hash: %v\n", hashAlgorithms)
+
+			// For resume, we need to re-hash with multi-hasher
+			if resume && existingBytesCopied > 0 {
+				fmt.Printf("Re-hashing existing %d bytes from source for resume (multi-hash)...\n", existingBytesCopied)
+				if _, err := io.CopyN(multiHasher, in, existingBytesCopied); err != nil {
 					log.Fatalf("Error hashing input file for resume: %v", err)
 				}
-			} else {
-				// Re-hash existing bytes from source
-				fmt.Printf("Re-hashing existing %d bytes from source for resume...\n", existingBytesCopied)
-				if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
-					log.Fatalf("Error hashing input file for resume: %v", err)
+			}
+		} else {
+			// Single hash mode (backward compatible)
+			switch hashAlgo {
+			case "md5":
+				hasher = md5.New()
+			case "sha1":
+				hasher = sha1.New()
+			case "sha256":
+				hasher = sha256.New()
+			}
+
+			// Restore hash state if available, otherwise re-hash existing data
+			if resume && existingBytesCopied > 0 {
+				if resumeMeta != nil && len(resumeMeta.HashState) > 0 {
+					// TODO: Go's standard hash interfaces don't support state serialization
+					// For now, we must re-hash. A future enhancement would use a custom
+					// hash wrapper that supports marshaling/unmarshaling state.
+					fmt.Printf("Note: Hash state restoration not yet implemented, re-hashing %d bytes...\n", existingBytesCopied)
+					if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
+						log.Fatalf("Error hashing input file for resume: %v", err)
+					}
+				} else {
+					// Re-hash existing bytes from source
+					fmt.Printf("Re-hashing existing %d bytes from source for resume...\n", existingBytesCopied)
+					if _, err := io.CopyN(hasher, in, existingBytesCopied); err != nil {
+						log.Fatalf("Error hashing input file for resume: %v", err)
+					}
 				}
 			}
 		}
@@ -214,17 +245,70 @@ var imageCmd = &cobra.Command{
 			log.Fatalf("Error opening destination: %v", err)
 		}
 
-		var out io.WriteCloser
+		// Build output writer stack: format -> sparse -> compression -> throttle
+		var baseWriter io.WriteCloser
 		fmtFormat := strings.ToLower(imgFormat)
 		if fmtFormat == "e01" || fmtFormat == "ewf" {
-			out, err = e01.NewWriter(outTarget, resume, meta)
+			baseWriter, err = e01.NewWriter(outTarget, resume, meta)
 		} else {
-			out, err = raw.NewWriter(outTarget)
+			baseWriter, err = raw.NewWriter(outTarget)
 		}
 		if err != nil {
 			log.Fatalf("Error creating output format writer: %v", err)
 		}
-		defer out.Close()
+
+		// Layer 1: Sparse file support (if enabled)
+		var sparseWriter *sparse.Writer
+		currentWriter := io.WriteCloser(baseWriter)
+		if sparseMode {
+			fmt.Println("Sparse mode enabled (zero blocks will be skipped)")
+			sparseWriter = sparse.NewWriter(currentWriter, blockSize, true)
+			currentWriter = sparseWriter
+		}
+
+		// Layer 2: Compression (if enabled)
+		var compWriter *compression.Writer
+		if compressionAlgo != "none" && compressionAlgo != "" {
+			algo := compression.Algorithm(compressionAlgo)
+			level := compression.Level(compressionLevel)
+
+			compWriter, err = compression.NewWriter(currentWriter, algo, level)
+			if err != nil {
+				log.Fatalf("Error creating compression writer: %v", err)
+			}
+			fmt.Printf("Compression enabled: %s (level %d)\n", compressionAlgo, compressionLevel)
+			currentWriter = compWriter
+		}
+
+		// Layer 3: Bandwidth throttling (if enabled)
+		var throttleWriter *throttle.Writer
+		if bandwidthLimit != "" {
+			limitBytes, err := parseBandwidthLimit(bandwidthLimit)
+			if err != nil {
+				log.Fatalf("Error parsing bandwidth limit: %v", err)
+			}
+			if limitBytes > 0 {
+				throttleWriter = throttle.NewWriter(currentWriter, limitBytes)
+				fmt.Printf("Bandwidth limit: %s (%d bytes/sec)\n", bandwidthLimit, limitBytes)
+				currentWriter = throttleWriter
+			}
+		}
+
+		// Final output writer (with all layers)
+		out := currentWriter
+		defer func() {
+			// Close all layers in reverse order
+			if throttleWriter != nil {
+				// Throttle writer doesn't need explicit close
+			}
+			if compWriter != nil {
+				compWriter.Close()
+			}
+			if sparseWriter != nil {
+				sparseWriter.Close()
+			}
+			baseWriter.Close()
+		}()
 
 		fmt.Printf("Starting imaging process...\nSource: %s\nDestination: %s\nFormat: %s\nHash: %s\n", 
 			inputFile, outputFile, fmtFormat, hashAlgo)
@@ -235,12 +319,18 @@ var imageCmd = &cobra.Command{
 		}
 
 		cfg := imager.Config{
-			Source:      wrappedReader,
-			Destination: out,
-			BlockSize:   blockSize,
-			HashAlgo:    hashAlgo,
-			Hasher:      hasher,
-			Metadata:    meta,
+			Source:         wrappedReader,
+			Destination:    out,
+			BlockSize:      blockSize,
+			HashAlgo:       hashAlgo,
+			HashAlgorithms: hashAlgorithms,
+			Hasher:         hasher,
+			Metadata:       meta,
+		}
+
+		// Set MultiHasher if using multi-hash mode
+		if usingMultiHash {
+			cfg.MultiHasher = multiHasher
 		}
 
 		start := time.Now()
@@ -298,7 +388,43 @@ var imageCmd = &cobra.Command{
 		if res != nil {
 			fmt.Printf("Total Bytes Copied: %d\n", res.BytesCopied)
 			fmt.Printf("Bad Sectors Encountered: %d\n", len(res.BadSectors))
-			fmt.Printf("Hash (%s): %s\n", hashAlgo, res.Hash)
+
+			// Display sparse statistics
+			if sparseWriter != nil {
+				sparseStats := sparseWriter.Stats()
+				fmt.Printf("\nSparse Statistics:\n")
+				fmt.Printf("  Total Blocks:  %d\n", sparseStats.TotalBlocks)
+				fmt.Printf("  Zero Blocks:   %d (%.2f%%)\n", sparseStats.ZeroBlocks, sparseStats.SparseRatio)
+				fmt.Printf("  Data Blocks:   %d\n", sparseStats.DataBlocks)
+				fmt.Printf("  Bytes Saved:   %d (%.2f GB)\n", sparseStats.BytesSaved,
+					float64(sparseStats.BytesSaved)/(1024*1024*1024))
+			}
+
+			// Display hash results
+			if usingMultiHash && multiHasher != nil {
+				// Get all hashes from MultiHasher
+				hashResult := multiHasher.Sum()
+				res.Hashes = make(map[string]string)
+
+				fmt.Println("\nHash Verification:")
+				if hashResult.MD5 != "" {
+					res.Hashes["md5"] = hashResult.MD5
+					fmt.Printf("  MD5:    %s\n", hashResult.MD5)
+				}
+				if hashResult.SHA1 != "" {
+					res.Hashes["sha1"] = hashResult.SHA1
+					fmt.Printf("  SHA1:   %s\n", hashResult.SHA1)
+				}
+				if hashResult.SHA256 != "" {
+					res.Hashes["sha256"] = hashResult.SHA256
+					fmt.Printf("  SHA256: %s\n", hashResult.SHA256)
+					// Set primary hash for backward compatibility
+					res.Hash = hashResult.SHA256
+				}
+			} else {
+				// Single hash mode
+				fmt.Printf("\nHash (%s): %s\n", hashAlgo, res.Hash)
+			}
 		}
 	},
 }
@@ -309,11 +435,12 @@ func init() {
 	imageCmd.Flags().StringVar(&outputFile, "out", "", "Output image file path (required)")
 	imageCmd.Flags().IntVar(&blockSize, "bs", 64*1024, "Block size in bytes")
 	imageCmd.Flags().StringVar(&hashAlgo, "hash", "sha256", "Hash algorithm (md5, sha1, sha256)")
-	
+	imageCmd.Flags().StringSliceVar(&hashAlgorithms, "multi-hash", []string{}, "Multiple hash algorithms (md5,sha1,sha256)")
+
 	// New Flags
 	imageCmd.Flags().StringVar(&imgFormat, "format", "raw", "Output format (raw, e01)")
 	imageCmd.Flags().BoolVar(&resume, "resume", false, "Resume from an interrupted imaging session")
-	
+
 	// Metadata Flags
 	imageCmd.Flags().StringVar(&caseNum, "case", "", "Case Number")
 	imageCmd.Flags().StringVar(&evidence, "evidence", "", "Evidence Number")
@@ -326,8 +453,69 @@ func init() {
 	imageCmd.Flags().BoolVar(&verifyWriteBlock, "verify-write-block", false, "Verify source is write-protected")
 	imageCmd.Flags().BoolVar(&collectGeometry, "geometry", false, "Collect disk geometry (CHS)")
 
+	// Performance and Optimization Flags
+	imageCmd.Flags().StringVar(&bandwidthLimit, "bandwidth-limit", "", "Bandwidth limit (e.g., 50M, 1G, 100K)")
+	imageCmd.Flags().StringVar(&compressionAlgo, "compress", "none", "Compression algorithm (none, gzip, zstd)")
+	imageCmd.Flags().IntVar(&compressionLevel, "compress-level", 5, "Compression level (1=fastest, 9=best)")
+	imageCmd.Flags().BoolVar(&sparseMode, "sparse", false, "Enable sparse file support (skip zero blocks)")
+
 	imageCmd.MarkFlagRequired("in")
 	imageCmd.MarkFlagRequired("out")
+}
+
+// parseBandwidthLimit converts strings like "50M", "1G", "100K" to bytes per second
+func parseBandwidthLimit(limit string) (int64, error) {
+	if limit == "" {
+		return 0, nil // No limit
+	}
+
+	limit = strings.TrimSpace(strings.ToUpper(limit))
+	if limit == "" {
+		return 0, nil
+	}
+
+	// Extract number and unit
+	var value float64
+	var unit string
+
+	// Try to parse with unit
+	if len(limit) > 0 {
+		lastChar := limit[len(limit)-1]
+		if lastChar >= 'A' && lastChar <= 'Z' {
+			unit = string(lastChar)
+			numPart := limit[:len(limit)-1]
+			var err error
+			value, err = strconv.ParseFloat(numPart, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid bandwidth limit: %s", limit)
+			}
+		} else {
+			// No unit, assume bytes
+			var err error
+			value, err = strconv.ParseFloat(limit, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid bandwidth limit: %s", limit)
+			}
+			unit = ""
+		}
+	}
+
+	// Convert to bytes per second
+	multiplier := int64(1)
+	switch unit {
+	case "K":
+		multiplier = 1024
+	case "M":
+		multiplier = 1024 * 1024
+	case "G":
+		multiplier = 1024 * 1024 * 1024
+	case "":
+		multiplier = 1
+	default:
+		return 0, fmt.Errorf("invalid bandwidth unit: %s (use K, M, or G)", unit)
+	}
+
+	return int64(value * float64(multiplier)), nil
 }
 
 // ProgressReader wraps an io.Reader to print progress.

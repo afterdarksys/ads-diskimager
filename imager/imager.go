@@ -20,12 +20,14 @@ type Metadata struct {
 }
 
 type Config struct {
-	Source      io.Reader
-	Destination io.Writer
-	BlockSize   int
-	HashAlgo    string // "md5", "sha1", "sha256"
-	Hasher      hash.Hash
-	Metadata    Metadata
+	Source         io.Reader
+	Destination    io.Writer
+	BlockSize      int
+	HashAlgo       string   // "md5", "sha1", "sha256" (primary algorithm for backward compatibility)
+	HashAlgorithms []string // Multiple algorithms: ["md5", "sha1", "sha256"]
+	Hasher         hash.Hash
+	MultiHasher    io.Writer // Optional multi-hash writer
+	Metadata       Metadata
 }
 
 // BadSector records a read error at a specific offset.
@@ -37,12 +39,13 @@ type BadSector struct {
 
 // Result holds the results of the imaging process.
 type Result struct {
-	BytesCopied int64       `json:"bytes_copied"`
-	Hash        string      `json:"hash"`
-	StartTime   time.Time   `json:"start_time"`
-	EndTime     time.Time   `json:"end_time"`
-	BadSectors  []BadSector `json:"bad_sectors,omitempty"`
-	Errors      []error     `json:"-"` // Internal errors unmarshaled safely
+	BytesCopied int64              `json:"bytes_copied"`
+	Hash        string             `json:"hash"` // Primary hash for backward compatibility
+	Hashes      map[string]string  `json:"hashes,omitempty"` // All computed hashes (md5, sha1, sha256)
+	StartTime   time.Time          `json:"start_time"`
+	EndTime     time.Time          `json:"end_time"`
+	BadSectors  []BadSector        `json:"bad_sectors,omitempty"`
+	Errors      []error            `json:"-"` // Internal errors unmarshaled safely
 }
 
 // Image performs the disk imaging process.
@@ -51,10 +54,20 @@ func Image(cfg Config) (*Result, error) {
 		cfg.BlockSize = 64 * 1024 // Default 64KB
 	}
 
+	// Determine hash writer (single or multi)
+	var hashWriter io.Writer
 	var hasher hash.Hash
-	if cfg.Hasher != nil {
+	usingMultiHash := cfg.MultiHasher != nil
+
+	if usingMultiHash {
+		// Use provided MultiHasher
+		hashWriter = cfg.MultiHasher
+	} else if cfg.Hasher != nil {
+		// Use provided single hasher
 		hasher = cfg.Hasher
+		hashWriter = hasher
 	} else {
+		// Create single hasher from HashAlgo
 		switch cfg.HashAlgo {
 		case "md5":
 			hasher = md5.New()
@@ -65,12 +78,14 @@ func Image(cfg Config) (*Result, error) {
 		default:
 			return nil, fmt.Errorf("unsupported hash algorithm: %s", cfg.HashAlgo)
 		}
+		hashWriter = hasher
 	}
 
-	multiWriter := io.MultiWriter(cfg.Destination, hasher)
+	multiWriter := io.MultiWriter(cfg.Destination, hashWriter)
 
 	res := &Result{
 		StartTime: time.Now(),
+		Hashes:    make(map[string]string),
 	}
 
 	buf := make([]byte, cfg.BlockSize)
@@ -121,7 +136,17 @@ func Image(cfg Config) (*Result, error) {
 	}
 
 	res.EndTime = time.Now()
-	res.Hash = fmt.Sprintf("%x", hasher.Sum(nil))
+
+	// Populate hash results
+	if usingMultiHash {
+		// MultiHasher results will be extracted in calling code
+		// Mark that multi-hash was used
+		res.Hash = "multi-hash-enabled"
+	} else if hasher != nil {
+		// Single hash
+		res.Hash = fmt.Sprintf("%x", hasher.Sum(nil))
+		res.Hashes[cfg.HashAlgo] = res.Hash
+	}
 
 	return res, nil
 }

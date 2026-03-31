@@ -15,6 +15,15 @@ A professional forensics-grade disk imaging and analysis tool written in Go, sup
 - 🔍 **Verification**: Built-in image integrity verification
 - 🖥️ **GUI Available**: Optional graphical interface
 
+### NEW in v2.1 🚀
+- ⚡ **Parallel Multi-Hash**: Compute MD5+SHA1+SHA256 simultaneously with zero performance penalty
+- 🧠 **Intelligent Error Recovery**: ddrescue-style adaptive retry logic for damaged disks
+- 🌐 **Bandwidth Throttling**: Precise network/disk bandwidth control
+- 📈 **Enhanced Progress**: Real-time ETA, speed monitoring, and phase tracking
+- 🗜️ **Compression Support**: Inline gzip/zstd compression (30-70% space savings)
+- 💾 **Sparse File Support**: Skip zero blocks (50-95% savings on sparse disks)
+- 🌐 **RESTful API Server**: Asynchronous job processing with real-time WebSocket progress
+
 ### Storage Backends
 - **Local filesystem**: Traditional forensic imaging
 - **AWS S3**: Direct to S3 buckets
@@ -38,8 +47,8 @@ A professional forensics-grade disk imaging and analysis tool written in Go, sup
 # Build from source
 go build -o diskimager .
 
-# Or use provided binary
-./bin/diskimager
+# Check version
+./diskimager --version
 ```
 
 ### Basic Usage
@@ -53,14 +62,32 @@ go build -o diskimager .
   --case "CASE-2024-001" \
   --examiner "John Doe"
 
-# Image directly to cloud storage (darkstorage.io)
+# NEW: Compute multiple hashes simultaneously (MD5+SHA1+SHA256)
+./diskimager image \
+  --in /dev/sda \
+  --out evidence.img \
+  --multi-hash md5,sha1,sha256 \
+  --case "CASE-2024-001"
+
+# Image with compression and sparse support (maximum efficiency)
+./diskimager image \
+  --in /dev/vda \
+  --out vm-backup.img.zst \
+  --multi-hash sha256 \
+  --compress zstd \
+  --sparse \
+  --case "VM-BACKUP-001"
+
+# Network imaging with bandwidth throttling
 export MINIO_ACCESS_KEY="your-access-key"
 export MINIO_SECRET_KEY="your-secret-key"
 
 ./diskimager image \
   --in /dev/sda \
-  --out minio://darkstorage.io/evidence/disk001.img \
-  --hash sha256 \
+  --out minio://darkstorage.io/evidence/disk001.img.zst \
+  --multi-hash md5,sha256 \
+  --compress zstd \
+  --bandwidth-limit 50M \
   --case "CASE-2024-001"
 
 # Create compressed E01 format
@@ -84,6 +111,7 @@ export MINIO_SECRET_KEY="your-secret-key"
 
 ## Documentation
 
+- **[docs/API_SERVER.md](docs/API_SERVER.md)** - Complete API server guide with examples
 - **[MINIO.md](MINIO.md)** - Complete guide for MinIO and darkstorage.io
 - **[ENHANCEME.md](ENHANCEME.md)** - Roadmap of future enhancements
 - **[BUGS.md](BUGS.md)** - Known issues and bug reports
@@ -161,6 +189,36 @@ Launch GUI for forensic operations.
 ```bash
 ./diskimager ui
 ```
+
+### `api-server` - RESTful API Server
+
+Start the forensic imaging API server for programmatic access and remote management.
+
+```bash
+# Basic server with API key authentication
+./diskimager api-server \
+  --bind-address :8080 \
+  --api-keys secret-key-1,secret-key-2 \
+  --max-workers 10
+
+# Production server with TLS and mTLS
+./diskimager api-server \
+  --bind-address :8443 \
+  --tls-cert server.crt \
+  --tls-key server.key \
+  --tls-ca ca.crt \
+  --api-keys key1,key2 \
+  --enable-cors
+```
+
+**Features:**
+- Asynchronous job processing with worker pool
+- Real-time progress via WebSocket streaming
+- API key and mTLS authentication
+- Support for all imaging features (compression, multi-hash, sparse, etc.)
+- OpenAPI 3.0 specification
+
+**See:** [docs/API_SERVER.md](docs/API_SERVER.md) for complete documentation
 
 ### `disktool` - Advanced Disk Tools
 
